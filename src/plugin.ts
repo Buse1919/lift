@@ -1,5 +1,4 @@
 import { flatten, get, has, merge } from "lodash";
-import chalk from "chalk";
 import type { AwsIamPolicyStatements } from "@serverless/typescript";
 import * as path from "path";
 import { readFileSync } from "fs";
@@ -9,6 +8,8 @@ import type { FromSchema } from "json-schema-to-ts";
 import type { ProviderInterface, StaticProviderInterface } from "@lift/providers";
 import { AwsProvider, StripeProvider } from "@lift/providers";
 import type { ConstructInterface, StaticConstructInterface } from "@lift/constructs";
+import { log, writeText } from "@serverless/utils/log";
+import chalk from "chalk";
 import type {
     CommandsDefinition,
     DeprecatedVariableResolver,
@@ -16,7 +17,7 @@ import type {
     Serverless,
     VariableResolver,
 } from "./types/serverless";
-import { log } from "./utils/logger";
+import { isV3, legacyLog, weAreInV3 } from "./utils/logger";
 import ServerlessError from "./utils/error";
 
 const PROVIDER_ID_PATTERN = "^[a-zA-Z0-9-_]+$";
@@ -85,8 +86,12 @@ class LiftPlugin {
     public readonly variableResolvers: Record<string, DeprecatedVariableResolver>;
     private readonly cliOptions: Record<string, string>;
 
-    constructor(serverless: Serverless, cliOptions: Record<string, string>) {
+    constructor(serverless: Serverless, cliOptions: Record<string, string>, utils?: Record<string, unknown>) {
         this.serverless = serverless;
+        if (utils) {
+            weAreInV3();
+        }
+
         // This method is exposed for Lift tests only, it is not a public API
         Object.assign(this.serverless, { getLiftProviderById: this.getLiftProviderById.bind(this) });
         this.cliOptions = cliOptions;
@@ -308,13 +313,30 @@ class LiftPlugin {
                 continue;
             }
             const outputs = construct.outputs();
-            if (Object.keys(outputs).length > 0) {
-                console.log(chalk.yellow(`${id}:`));
+            if (Object.keys(outputs).length === 1) {
+                const resolver = Object.values(outputs)[0];
+                const output = await resolver();
+                if (output !== undefined) {
+                    if (isV3) {
+                        this.serverless.addServiceOutputSection(id, output);
+                    } else {
+                        console.log(`${chalk.yellow(`${id}:`)} ${output}`);
+                    }
+                }
+            }
+            if (Object.keys(outputs).length > 1) {
+                const content: string[] = [];
                 for (const [name, resolver] of Object.entries(outputs)) {
                     const output = await resolver();
                     if (output !== undefined) {
-                        console.log(`  ${name}: ${output}`);
+                        content.push(`${name}: ${output}`);
                     }
+                }
+                if (isV3) {
+                    this.serverless.addServiceOutputSection(id, content);
+                } else {
+                    console.log(chalk.yellow(`${id}:`));
+                    console.log(content.map((line) => `  ${line}`).join(`\n`));
                 }
             }
         }
@@ -440,16 +462,27 @@ class LiftPlugin {
     }
 
     private async eject() {
-        log("Ejecting from Lift to CloudFormation");
+        if (isV3) {
+            log("Ejecting from Lift to CloudFormation");
+            log();
+        } else {
+            legacyLog("Ejecting from Lift to CloudFormation");
+            legacyLog("");
+        }
         await this.serverless.pluginManager.spawn("package");
         const legacyProvider = this.serverless.getProvider("aws");
         const compiledTemplateFileName = legacyProvider.naming.getCompiledTemplateFileName();
         const compiledTemplateFilePath = path.join(this.serverless.serviceDir, ".serverless", compiledTemplateFileName);
         const cfTemplate = readFileSync(compiledTemplateFilePath);
         const formattedYaml = dump(JSON.parse(cfTemplate.toString()));
-        console.log(formattedYaml);
-        log("You can also find that CloudFormation template in the following file:");
-        log(compiledTemplateFilePath);
+        writeText(formattedYaml);
+        if (isV3) {
+            log("You can also find that CloudFormation template in the following file:");
+            log(compiledTemplateFilePath);
+        } else {
+            legacyLog("You can also find that CloudFormation template in the following file:");
+            legacyLog(compiledTemplateFilePath);
+        }
     }
 
     private getAllConstructClasses(): StaticConstructInterface[] {

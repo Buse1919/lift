@@ -8,7 +8,8 @@ import type {
     SendMessageBatchResult,
 } from "aws-sdk/clients/sqs";
 import type { AwsProvider } from "@lift/providers";
-import { log } from "../../../utils/logger";
+import { log } from "@serverless/utils/log";
+import { isV3, legacyLog } from "../../../utils/logger";
 import { sleep } from "../../../utils/sleep";
 
 type ProgressCallback = (numberOfMessagesFound: number) => void;
@@ -123,9 +124,15 @@ export async function retryMessages(
         }
     );
     if (deletionResult.Failed.length > 0) {
-        log(
-            `${deletionResult.Failed.length} failed messages were not successfully deleted from the dead letter queue. These messages will be retried in the main queue, but they will also still be present in the dead letter queue.`
-        );
+        if (isV3) {
+            log.warning(
+                `${deletionResult.Failed.length} failed messages were not successfully deleted from the dead letter queue. These messages will be retried in the main queue, but they will also still be present in the dead letter queue.`
+            );
+        } else {
+            legacyLog(
+                `${deletionResult.Failed.length} failed messages were not successfully deleted from the dead letter queue. These messages will be retried in the main queue, but they will also still be present in the dead letter queue.`
+            );
+        }
     }
 
     return {

@@ -20,6 +20,7 @@
     "@aws-cdk/aws-sns": "^1.110.1",
     "@aws-cdk/aws-sqs": "^1.110.1",
     "@aws-cdk/core": "^1.110.1",
+    "@serverless/utils": "^5.20.0",
     "aws-sdk": "^2.942.0",
     "chalk": "^4.1.1",
     "change-case": "^4.1.2",
@@ -92,6 +93,6 @@
   },
   "types": "dist/src/plugin.d.ts",
   "peerDependencies": {
-    "serverless": "^2.36.0"
+    "serverless": "^2.36.0 || pre-3"
   }
 }

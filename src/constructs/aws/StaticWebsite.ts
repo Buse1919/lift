@@ -20,7 +20,9 @@ import type { ErrorResponse } from "@aws-cdk/aws-cloudfront/lib/distribution";
 import type { AwsProvider } from "@lift/providers";
 import { AwsConstruct } from "@lift/constructs/abstracts";
 import type { ConstructCommands } from "@lift/constructs";
-import { log } from "../../utils/logger";
+import type { Progress } from "@serverless/utils/log";
+import { log, progress } from "@serverless/utils/log";
+import { isV3, legacyLog } from "../../utils/logger";
 import { s3Sync } from "../../utils/s3-sync";
 import ServerlessError from "../../utils/error";
 import { emptyBucket, invalidateCloudFrontCache } from "../../classes/aws";
@@ -63,7 +65,7 @@ export class StaticWebsite extends AwsConstruct {
     public static commands: ConstructCommands = {
         upload: {
             usage: "Upload files directly to S3 without going through a CloudFormation deployment.",
-            handler: StaticWebsite.prototype.uploadWebsite,
+            handler: StaticWebsite.prototype.uploadWebsiteCommand,
         },
     };
 
@@ -187,9 +189,27 @@ export class StaticWebsite extends AwsConstruct {
         await this.uploadWebsite();
     }
 
-    async uploadWebsite(): Promise<void> {
-        log(`Deploying the static website '${this.id}'`);
+    async uploadWebsiteCommand(): Promise<void> {
+        if (isV3) {
+            log(`Deploying the static website '${this.id}'`);
+        } else {
+            legacyLog(`Deploying the static website '${this.id}'`);
+        }
 
+        const fileChangeCount = await this.uploadWebsite();
+
+        const domain = await this.getDomain();
+        if (domain !== undefined) {
+            if (isV3) {
+                log();
+                log.success(`Deployed https://${domain} ${chalk.gray(`(${fileChangeCount} files changed)`)}`);
+            } else {
+                legacyLog(`Deployed https://${domain} ${chalk.gray(`(${fileChangeCount} files changed)`)}`);
+            }
+        }
+    }
+
+    private async uploadWebsite(): Promise<number> {
         const bucketName = await this.getBucketName();
         if (bucketName === undefined) {
             throw new ServerlessError(
@@ -198,20 +218,34 @@ export class StaticWebsite extends AwsConstruct {
             );
         }
 
-        log(`Uploading directory '${this.configuration.path}' to bucket '${bucketName}'`);
-        const { hasChanges } = await s3Sync({
+        let uploadProgress: Progress | undefined;
+        if (isV3) {
+            uploadProgress = progress.create({
+                message: `Uploading directory '${this.configuration.path}' to bucket '${bucketName}'`,
+            });
+            log.verbose(`Uploading directory '${this.configuration.path}' to bucket '${bucketName}'`);
+        } else {
+            legacyLog(`Uploading directory '${this.configuration.path}' to bucket '${bucketName}'`);
+        }
+        const { hasChanges, fileChangeCount } = await s3Sync({
             aws: this.provider,
             localPath: this.configuration.path,
             bucketName,
         });
         if (hasChanges) {
+            if (uploadProgress) {
+                uploadProgress.update(`Clearing CloudFront DNS cache`);
+            } else {
+                legacyLog(`Clearing CloudFront DNS cache`);
+            }
             await this.clearCDNCache();
         }
 
-        const domain = await this.getDomain();
-        if (domain !== undefined) {
-            log(`Deployed ${chalk.green(`https://${domain}`)}`);
+        if (uploadProgress) {
+            uploadProgress.remove();
         }
+
+        return fileChangeCount;
     }
 
     private async clearCDNCache(): Promise<void> {
@@ -229,9 +263,15 @@ export class StaticWebsite extends AwsConstruct {
             return;
         }
 
-        log(
-            `Emptying S3 bucket '${bucketName}' for the '${this.id}' static website, else CloudFormation will fail (it cannot delete a non-empty bucket)`
-        );
+        if (isV3) {
+            log(
+                `Emptying S3 bucket '${bucketName}' for the '${this.id}' static website, else CloudFormation will fail (it cannot delete a non-empty bucket)`
+            );
+        } else {
+            legacyLog(
+                `Emptying S3 bucket '${bucketName}' for the '${this.id}' static website, else CloudFormation will fail (it cannot delete a non-empty bucket)`
+            );
+        }
         await emptyBucket(this.provider, bucketName);
     }
 

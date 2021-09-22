@@ -28,7 +28,9 @@ import * as cloudfront from "@aws-cdk/aws-cloudfront";
 import { AwsConstruct } from "@lift/constructs/abstracts";
 import type { ConstructCommands } from "@lift/constructs";
 import type { AwsProvider } from "@lift/providers";
-import { log } from "../../utils/logger";
+import type { Progress } from "@serverless/utils/log";
+import { log, progress } from "@serverless/utils/log";
+import { isV3, legacyLog } from "../../utils/logger";
 import { s3Put, s3Sync } from "../../utils/s3-sync";
 import { emptyBucket, invalidateCloudFrontCache } from "../../classes/aws";
 import ServerlessError from "../../utils/error";
@@ -72,7 +74,7 @@ export class ServerSideWebsite extends AwsConstruct {
     public static commands: ConstructCommands = {
         "assets:upload": {
             usage: "Upload assets directly to S3 without going through a CloudFormation deployment.",
-            handler: ServerSideWebsite.prototype.uploadAssets,
+            handler: ServerSideWebsite.prototype.uploadAssetsCommand,
         },
     };
 
@@ -92,13 +94,15 @@ export class ServerSideWebsite extends AwsConstruct {
         super(scope, id);
 
         if (configuration.domain !== undefined && configuration.certificate === undefined) {
-            throw new Error(
-                `Invalid configuration in 'constructs.${id}.certificate': if a domain is configured, then a certificate ARN must be configured as well.`
+            throw new ServerlessError(
+                `Invalid configuration in 'constructs.${id}.certificate': if a domain is configured, then a certificate ARN must be configured as well.`,
+                "LIFT_INVALID_CONSTRUCT_CONFIGURATION"
             );
         }
         if (configuration.errorPage !== undefined && !configuration.errorPage.endsWith(".html")) {
-            throw new Error(
-                `Invalid configuration in 'constructs.${id}.errorPage': the custom error page must be a static HTML file. '${configuration.errorPage}' does not end with '.html'.`
+            throw new ServerlessError(
+                `Invalid configuration in 'constructs.${id}.errorPage': the custom error page must be a static HTML file. '${configuration.errorPage}' does not end with '.html'.`,
+                "LIFT_INVALID_CONSTRUCT_CONFIGURATION"
             );
         }
 
@@ -224,20 +228,47 @@ export class ServerSideWebsite extends AwsConstruct {
         await this.uploadAssets();
     }
 
-    async uploadAssets(): Promise<void> {
-        log(`Deploying the assets for the '${this.id}' website`);
+    async uploadAssetsCommand(): Promise<void> {
+        if (isV3) {
+            log(`Deploying the assets for the '${this.id}' website`);
+        } else {
+            legacyLog(`Deploying the assets for the '${this.id}' website`);
+        }
 
+        await this.uploadAssets();
+
+        const domain = await this.getDomain();
+        if (domain !== undefined) {
+            if (isV3) {
+                log();
+                log.success(`Deployed https://${domain}`);
+            } else {
+                legacyLog(`Deployed https://${domain}`);
+            }
+        }
+    }
+
+    async uploadAssets(): Promise<void> {
         const bucketName = await this.getBucketName();
         if (bucketName === undefined) {
-            throw new Error(
-                `Could not find the bucket in which to deploy the '${this.id}' website: did you forget to run 'serverless deploy' first?`
+            throw new ServerlessError(
+                `Could not find the bucket in which to deploy the '${this.id}' website: did you forget to run 'serverless deploy' first?`,
+                "LIFT_MISSING_STACK_OUTPUT"
             );
+        }
+
+        let uploadProgress: Progress | undefined;
+        if (isV3) {
+            uploadProgress = progress.create();
         }
 
         let invalidate = false;
         for (const [pattern, filePath] of Object.entries(this.getAssetPatterns())) {
             if (!fs.existsSync(filePath)) {
-                throw new Error(`Error in 'constructs.${this.id}': the file or directory '${filePath}' does not exist`);
+                throw new ServerlessError(
+                    `Error in 'constructs.${this.id}': the file or directory '${filePath}' does not exist`,
+                    "LIFT_INVALID_CONSTRUCT_CONFIGURATION"
+                );
             }
             let s3PathPrefix: string = path.dirname(pattern);
             if (s3PathPrefix.startsWith("/")) {
@@ -246,7 +277,11 @@ export class ServerSideWebsite extends AwsConstruct {
 
             if (fs.lstatSync(filePath).isDirectory()) {
                 // Directory
-                log(`Uploading '${filePath}' to 's3://${bucketName}/${s3PathPrefix}'`);
+                if (uploadProgress) {
+                    uploadProgress.update(`Uploading '${filePath}' to 's3://${bucketName}/${s3PathPrefix}'`);
+                } else {
+                    legacyLog(`Uploading '${filePath}' to 's3://${bucketName}/${s3PathPrefix}'`);
+                }
                 const { hasChanges } = await s3Sync({
                     aws: this.provider,
                     localPath: filePath,
@@ -257,18 +292,26 @@ export class ServerSideWebsite extends AwsConstruct {
             } else {
                 // File
                 const targetKey = path.join(s3PathPrefix, path.basename(filePath));
-                log(`Uploading '${filePath}' to 's3://${bucketName}/${targetKey}'`);
+                if (uploadProgress) {
+                    uploadProgress.update(`Uploading '${filePath}' to 's3://${bucketName}/${targetKey}'`);
+                } else {
+                    legacyLog(`Uploading '${filePath}' to 's3://${bucketName}/${targetKey}'`);
+                }
                 await s3Put(this.provider, bucketName, targetKey, fs.readFileSync(filePath));
                 invalidate = true;
             }
         }
         if (invalidate) {
+            if (uploadProgress) {
+                uploadProgress.update(`Clearing CloudFront DNS cache`);
+            } else {
+                legacyLog(`Clearing CloudFront DNS cache`);
+            }
             await this.clearCDNCache();
         }
 
-        const domain = await this.getDomain();
-        if (domain !== undefined) {
-            log(`Deployed ${chalk.green(`https://${domain}`)}`);
+        if (uploadProgress) {
+            uploadProgress.remove();
         }
     }
 
@@ -287,9 +330,15 @@ export class ServerSideWebsite extends AwsConstruct {
             return;
         }
 
-        log(
-            `Emptying S3 bucket '${bucketName}' for the '${this.id}' website, else CloudFormation will fail (it cannot delete a non-empty bucket)`
-        );
+        if (isV3) {
+            log(
+                `Emptying S3 bucket '${bucketName}' for the '${this.id}' website, else CloudFormation will fail (it cannot delete a non-empty bucket)`
+            );
+        } else {
+            legacyLog(
+                `Emptying S3 bucket '${bucketName}' for the '${this.id}' website, else CloudFormation will fail (it cannot delete a non-empty bucket)`
+            );
+        }
         await emptyBucket(this.provider, bucketName);
     }
 
